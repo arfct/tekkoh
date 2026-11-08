@@ -1,0 +1,23 @@
+{
+	admin off
+}
+
+:{$PORT:8080} {
+	root * /srv
+	encode zstd gzip
+	header {
+		# Only this origin's own files run, and the page may talk only to the API.
+		Content-Security-Policy "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src https://tekkoh.cronbon.com; manifest-src 'self'; worker-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+		Referrer-Policy no-referrer
+		X-Content-Type-Options nosniff
+		Cross-Origin-Opener-Policy same-origin
+		Cross-Origin-Resource-Policy same-origin
+		Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=()"
+		Strict-Transport-Security "max-age=31536000"
+		Cache-Control "no-cache"
+		-Server
+	}
+	@hidden path /tests/* /Caddyfile /Dockerfile /README.md
+	respond @hidden 404
+	file_server
+}
