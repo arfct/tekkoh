@@ -24,28 +24,33 @@ leaves the phone unencrypted.
   1. The phone stretches the PIN (PBKDF2-SHA256, 600,000 rounds, random salt)
      into two halves: a *verifier* and a *wrapping key*.
   2. It locks the journal key with the wrapping key and sends the locked
-     key and the verifier at sign-up.
+     key and the verifier at sign-up, boxed to this server's X25519 key
+     (derived from `TEKKOH_SECRET`, built into the app; see `transport.go`)
+     so nothing in between can read them.
   3. The server stores an HMAC of the verifier and seals the locked key
      again (AES-GCM), both under `TEKKOH_SECRET`, which lives in Berth's
      config, not the database.
   4. To recover, a phone stretches the PIN again and sends the verifier. The
-     server releases the locked key only if it matches; **10 wrong PINs wipe
-     it** (a device that still has the key can set a new PIN).
+     server releases the locked key only if it matches, boxed back. After
+     three wrong PINs each try waits longer (1, 2, 4… minutes); **10 wrong
+     PINs wipe it** (a device that still has the key can set a new PIN).
+     Unknown usernames answer like real ones, and failures across all
+     accounts are capped per hour.
 
 A copy of the database alone can't be used to test PINs or open a key: it
-needs the secret too. Someone who controls the live server *and* its secret
-could try all million PINs offline, so the PIN protects against stolen
-data, not against the server's operator; iCloud Keychain and the device
-keep the key otherwise.
+needs the secret too. Someone with the database *and* the secret (the live
+server, or a Berth backup, which holds both) could try all million PINs
+offline. See the app's SECURITY.md for the full picture.
 
 ## API
 
 | | |
 |---|---|
-| `POST /v1/accounts` | `{handle, auth, recovery: {salt, iterations, verifier, blob}}` (base64) |
-| `GET /v1/recovery?handle=` | `{salt, iterations, attemptsLeft}` |
-| `POST /v1/recovery` | `{handle, verifier}` → `{blob}`, or 403 `{attemptsLeft}`, or 410 once wiped |
-| `PUT /v1/recovery` | (signed in) a new PIN |
+| `POST /v1/accounts` | `{handle, auth, recovery: {eph, box}}`; the box holds `{salt, iterations, verifier, blob}` |
+| `GET /v1/transport-key` | the server's X25519 public key |
+| `POST /v1/recovery/params` | `{handle}` → `{salt, iterations, attemptsLeft}` |
+| `POST /v1/recovery` | `{handle, proof: {eph, box}}` → `{reply}` (boxed `{blob}`), or 403 `{attemptsLeft}`, 429 `{retryAfter}`, 410 once wiped |
+| `PUT /v1/recovery` | (signed in) `{eph, box}`: a new PIN |
 | `GET /v1/me`, `DELETE /v1/me` | the account; delete it and everything in it |
 | `GET /v1/entries?after=<seq>` | changes since a cursor: `{entries: [{id, data, rev, seq, deleted}], cursor, more}` |
 | `PUT /v1/entries/:id` | `{data, rev}`; 409 if `rev` isn't current |
