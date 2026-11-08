@@ -38,14 +38,16 @@ type Entry struct {
 	Deleted   bool      `json:"deleted,omitempty"`
 }
 
-// A Session is a linked browser's own sign-in: it can read and write the
-// journal but not change the PIN, manage sessions or delete the account,
-// and the phone can revoke it.
+// A Session is a linked browser's or agent's own sign-in: it can read and
+// write the journal but not change the PIN, manage sessions or delete the
+// account, and the phone can revoke it.
 type Session struct {
-	ID        string    `json:"id"`
-	Handle    string    `json:"-"`
-	TokenHash []byte    `json:"-"`
-	Label     string    `json:"label"`
+	ID        string `json:"id"`
+	Handle    string `json:"-"`
+	TokenHash []byte `json:"-"`
+	Label     string `json:"label"`
+	// Kind is "browser" or "agent" (the command-line tool).
+	Kind      string    `json:"kind"`
 	CreatedAt time.Time `json:"createdAt"`
 	LastUsed  time.Time `json:"lastUsed"`
 }

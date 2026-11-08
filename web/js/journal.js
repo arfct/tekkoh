@@ -65,6 +65,14 @@ export function merge(remote, local, base) {
   out.created = Math.min(remote.created, local.created);
   out.updated = Math.max(remote.updated, local.updated, toSwift(Date.now()));
   out.version = Math.max(v(remote), v(local)) + 1;
+  // Agents' notes: one per agent, the newer edit winning.
+  const notes = new Map();
+  for (const n of [...(remote.agentNotes || []), ...(local.agentNotes || [])]) {
+    const cur = notes.get(n.id);
+    if (!cur || n.updated > cur.updated) notes.set(n.id, n);
+  }
+  if (notes.size) out.agentNotes = [...notes.values()];
+  else delete out.agentNotes;
   return out;
 }
 

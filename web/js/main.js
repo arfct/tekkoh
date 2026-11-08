@@ -221,12 +221,20 @@ function renderPage() {
   );
 
   const margin = el("div", { class: "margin" }, ...marginNotes(e));
+  const notes = agentNotes(e);
   const photos = photoShelf(e);
   const writing = el("div", { class: "writing" }, writingArea(e));
   spread.replaceChildren(
-    el("section", { class: "page left" }, header, margin, photos),
+    el("section", { class: "page left" }, header, margin, notes, photos),
     el("section", { class: "page right" }, writing),
   );
+}
+
+// What agents did for you that day, in their own words, set apart from yours.
+function agentNotes(e) {
+  const list = (e.agentNotes || []).filter((n) => n.text.trim());
+  return el("div", { class: "agent-notes" }, ...list.map((n) =>
+    el("div", { class: "agent-note" }, el("p", { class: "label" }, n.agent.toUpperCase()), el("p", {}, n.text))));
 }
 
 function marginNotes(e) {

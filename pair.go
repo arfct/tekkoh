@@ -113,8 +113,18 @@ func (s *Server) takeSlot(w http.ResponseWriter, r *http.Request) {
 func (s *Server) createSession(w http.ResponseWriter, r *http.Request, h string) {
 	var body struct {
 		Label string `json:"label"`
+		Kind  string `json:"kind"`
 	}
 	if !readJSON(w, r, &body, 4<<10) {
+		return
+	}
+	kind := body.Kind
+	switch kind {
+	case "":
+		kind = "browser"
+	case "browser", "agent":
+	default:
+		fail(w, 400, "kind is browser or agent")
 		return
 	}
 	label := strings.TrimSpace(body.Label)
@@ -122,12 +132,12 @@ func (s *Server) createSession(w http.ResponseWriter, r *http.Request, h string)
 		label = label[:80]
 	}
 	if label == "" {
-		label = "A browser"
+		label = map[string]string{"browser": "A browser", "agent": "An agent"}[kind]
 	}
 	tok := make([]byte, 32)
 	rand.Read(tok)
 	sum := sha256.Sum256(tok)
-	sess := &Session{ID: randomID(), Handle: h, TokenHash: sum[:], Label: label, CreatedAt: time.Now().UTC(), LastUsed: time.Now().UTC()}
+	sess := &Session{ID: randomID(), Handle: h, TokenHash: sum[:], Label: label, Kind: kind, CreatedAt: time.Now().UTC(), LastUsed: time.Now().UTC()}
 	if err := s.store.CreateSession(r.Context(), sess); err != nil {
 		serverError(w, err)
 		return

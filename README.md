@@ -55,6 +55,60 @@ app's Swift) and `node web/tests/live.mjs` (linking and sync against the
 live server). The app's SECURITY.md covers what the web can and can't
 promise.
 
+## The command-line tool, for agents
+
+`cmd/tekkoh` lets a personal agent (in a confidential VM, say) read and
+write the journal, and note what it did for you each day. It's one static
+binary. All the encryption happens in it, with the same crypto as the app,
+checked against the Swift vectors in `crypto_test.go`.
+
+```sh
+GOOS=linux GOARCH=amd64 go build -o tekkoh ./cmd/tekkoh   # for the VM
+```
+
+**Link it once**, with you there. It needs your username, your PIN and
+your phone, as linking a browser does:
+
+```sh
+tekkoh link --name "Morning agent"
+# Username, PIN, then a QR code: on the phone, Settings, Link a browser or
+# agent, scan it and check the six digits match.
+```
+
+**Then the agent can:**
+
+```sh
+tekkoh read                      # today's page: words, places, activity, photos' captions, notes
+tekkoh read yesterday --json     # the same, for a program
+tekkoh days --from -30 --json    # the last month's days with anything on them
+tekkoh search dentist            # pages mentioning it
+tekkoh streak
+tekkoh photos 2026-11-08 --out ./photos
+
+tekkoh write "Picked up the dry cleaning."    # adds to today's words
+echo "..." | tekkoh write yesterday --replace -
+tekkoh note "Booked the dentist for Tuesday at 10. Paid the water bill."
+tekkoh note --replace "Today: renewed the car insurance."
+```
+
+A note is the agent's own: one per agent per day, kept inside the
+encrypted page apart from your words, and shown in the margin in the app
+and on the web. `note` adds a line to it; `--replace` or `--clear` change
+it. Days are in the time zone the phone reported when linking (`--tz` or
+`$TEKKOH_TZ` override it).
+
+The key lives in `~/.config/tekkoh/identity.json` (or `$TEKKOH_HOME`),
+mode 0600. Anything holding it can read everything, and can act as your
+phone. Link only agents you trust with the whole journal: see the app's
+SECURITY.md, "Agents". `tekkoh unlink` signs it out and deletes the key;
+the phone can sign it out too.
+
+Tests: `go test ./cmd/tekkoh` checks the crypto against the app's
+vectors. `TEKKOH_LIVE=1 go test -run Live ./cmd/tekkoh` runs the whole
+cycle on a throwaway journal against the server and then deletes it: link,
+write, a concurrent edit, notes, search, and sign-out. Set `TEKKOH_SERVER`
+and `TEKKOH_SERVER_KEY` to run it against another server.
+
 ## API
 
 | | |
@@ -72,7 +126,7 @@ promise.
 | `POST /v1/pair` | a browser opens a linking slot: `{id, expiresIn}` |
 | `PUT /v1/pair/:id` | (the phone) `{box}`: the journal key sealed to the browser |
 | `GET /v1/pair/:id` | the browser collects it once: `{box, handle}`, or 202 while waiting |
-| `POST /v1/sessions`, `GET /v1/sessions` | (the phone) link a browser's session; list them |
+| `POST /v1/sessions`, `GET /v1/sessions` | (the phone) link a browser's or agent's session (`kind`: `browser` or `agent`); list them |
 | `DELETE /v1/sessions/:id` | the phone signs a browser out; a browser signs itself out with `current` |
 
 Signed-in requests send `Authorization: Tekkoh <handle> <base64 token>`.

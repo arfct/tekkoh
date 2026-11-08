@@ -509,6 +509,33 @@ func TestBrowserSessionsCanWriteButNotRuleTheJournal(t *testing.T) {
 	}
 }
 
+func TestSessionsSayWhetherTheyreABrowserOrAnAgent(t *testing.T) {
+	c, _, _ := newClient(t)
+	a := signUp(t, c, "ana")
+	if code, _ := c.do("POST", "/v1/sessions", map[string]any{"label": "x", "kind": "robot"}, a.header); code != 400 {
+		t.Fatalf("unknown kind: %d", code)
+	}
+	_, ag := c.do("POST", "/v1/sessions", map[string]any{"label": "Morning digest", "kind": "agent"}, a.header)
+	c.do("POST", "/v1/sessions", map[string]any{"label": "Safari"}, a.header)
+	agent := "Tekkoh ana " + ag["token"].(string)
+	if code, out := c.do("GET", "/v1/me", nil, agent); code != 200 || out["session"].(map[string]any)["kind"] != "agent" {
+		t.Fatalf("agent me: %d %v", code, out)
+	}
+	_, list := c.do("GET", "/v1/sessions", nil, a.header)
+	kinds := map[string]string{}
+	for _, s := range list["sessions"].([]any) {
+		m := s.(map[string]any)
+		kinds[m["label"].(string)] = m["kind"].(string)
+	}
+	if kinds["Morning digest"] != "agent" || kinds["Safari"] != "browser" {
+		t.Fatalf("kinds: %v", kinds)
+	}
+	// An agent, like a browser, can't rule the journal.
+	if code, _ := c.do("DELETE", "/v1/me", nil, agent); code != 403 {
+		t.Fatalf("agent deleted the journal: %d", code)
+	}
+}
+
 func TestOnlyTheWebAppsOriginMayCallFromABrowser(t *testing.T) {
 	c, _, _ := newClient(t)
 	pre := func(origin string) *http.Response {

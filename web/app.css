@@ -189,6 +189,12 @@ input, textarea { font: inherit; color: inherit; }
 .place .time { margin-left: auto; }
 .workout { color: var(--vermillion); }
 
+.agent-notes { display: grid; gap: 12px; margin-bottom: 14px; }
+.agent-notes:empty { display: none; }
+.agent-note { border-left: 1.5px solid color-mix(in srgb, var(--indigo) 55%, transparent); padding-left: 10px; }
+.agent-note .label { color: var(--indigo); letter-spacing: .12em; margin: 0 0 4px; }
+.agent-note p:last-child { margin: 0; font-style: italic; font-size: 14px; color: var(--muted); white-space: pre-wrap; }
+
 .writing { min-height: 52vh; display: flex; }
 .writing textarea {
   flex: 1;
@@ -309,11 +315,12 @@ dd { margin: 0; }
 @media (max-width: 899px) {
   .spread { display: flex; flex-direction: column; }
   .page { display: contents; }
-  .date, .margin, .shelf { margin-left: 20px; margin-right: 20px; }
+  .date, .margin, .shelf, .agent-notes { margin-left: 20px; margin-right: 20px; }
   .date { order: 1; }
   .margin { order: 2; }
   .page.right .writing { order: 3; margin: 0 8px; }
   .shelf { order: 4; }
+  .agent-notes { order: 5; margin-top: 16px; }
 }
 
 .month .cell { width: 52px; justify-self: center; }
