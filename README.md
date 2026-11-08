@@ -42,6 +42,19 @@ needs the secret too. Someone with the database *and* the secret (the live
 server, or a Berth backup, which holds both) could try all million PINs
 offline. See the app's SECURITY.md for the full picture.
 
+## The web app
+
+`web/` is Tekkoh in a browser, deployed as its own Berth app
+(`berth create tekkoh-web --repo dps/tekkoh-berth --path web`) at
+https://tekkoh-web.cronbon.com: static files behind Caddy with a strict
+Content-Security-Policy, the crypto in WebCrypto, pages sealed in
+IndexedDB. A browser links with the username, the PIN and the phone (a QR
+code with a one-time X25519 key); it gets its own session, which the phone
+can revoke. Tests: `node web/tests/vectors.mjs` (crypto against the
+app's Swift) and `node web/tests/live.mjs` (linking and sync against the
+live server). The app's SECURITY.md covers what the web can and can't
+promise.
+
 ## API
 
 | | |
@@ -56,6 +69,11 @@ offline. See the app's SECURITY.md for the full picture.
 | `PUT /v1/entries/:id` | `{data, rev}`; 409 if `rev` isn't current |
 | `DELETE /v1/entries/:id?rev=` | leaves a tombstone for other devices |
 | `PUT/GET/DELETE /v1/blobs/:id` | encrypted photo bytes |
+| `POST /v1/pair` | a browser opens a linking slot: `{id, expiresIn}` |
+| `PUT /v1/pair/:id` | (the phone) `{box}`: the journal key sealed to the browser |
+| `GET /v1/pair/:id` | the browser collects it once: `{box, handle}`, or 202 while waiting |
+| `POST /v1/sessions`, `GET /v1/sessions` | (the phone) link a browser's session; list them |
+| `DELETE /v1/sessions/:id` | the phone signs a browser out; a browser signs itself out with `current` |
 
 Signed-in requests send `Authorization: Tekkoh <handle> <base64 token>`.
 Recovery and sign-up are rate limited per IP.
