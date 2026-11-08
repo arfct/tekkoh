@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/hkdf"
@@ -61,11 +62,14 @@ type Server struct {
 	// that don't exist (so they answer like ones that do).
 	failures *limiter
 	ghosts   *limiter
+	pair     *pairing
+	origins  map[string]bool
 }
 
 func NewServer(store Store, secret []byte) *Server {
 	return &Server{store: store, secret: secret, limit: newLimiter(20, time.Hour),
-		failures: newLimiter(maxFailuresPerHour, time.Hour), ghosts: newLimiter(MaxAttempts, 24*time.Hour)}
+		failures: newLimiter(maxFailuresPerHour, time.Hour), ghosts: newLimiter(MaxAttempts, 24*time.Hour),
+		pair: newPairing(), origins: webOrigins()}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -81,16 +85,22 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/accounts", s.createAccount)
 	mux.HandleFunc("POST /v1/recovery/params", s.recoveryParams)
 	mux.HandleFunc("POST /v1/recovery", s.recover)
-	mux.HandleFunc("PUT /v1/recovery", s.auth(s.setRecovery))
+	mux.HandleFunc("PUT /v1/recovery", s.owner(s.setRecovery))
 	mux.HandleFunc("GET /v1/me", s.auth(s.me))
-	mux.HandleFunc("DELETE /v1/me", s.auth(s.deleteMe))
+	mux.HandleFunc("DELETE /v1/me", s.owner(s.deleteMe))
+	mux.HandleFunc("POST /v1/pair", s.openSlot)
+	mux.HandleFunc("PUT /v1/pair/{id}", s.owner(s.fillSlot))
+	mux.HandleFunc("GET /v1/pair/{id}", s.takeSlot)
+	mux.HandleFunc("POST /v1/sessions", s.owner(s.createSession))
+	mux.HandleFunc("GET /v1/sessions", s.owner(s.listSessions))
+	mux.HandleFunc("DELETE /v1/sessions/{id}", s.auth(s.deleteSession))
 	mux.HandleFunc("GET /v1/entries", s.auth(s.entries))
 	mux.HandleFunc("PUT /v1/entries/{id}", s.auth(s.putEntry))
 	mux.HandleFunc("DELETE /v1/entries/{id}", s.auth(s.deleteEntry))
 	mux.HandleFunc("PUT /v1/blobs/{id}", s.auth(s.putBlob))
 	mux.HandleFunc("GET /v1/blobs/{id}", s.auth(s.getBlob))
 	mux.HandleFunc("DELETE /v1/blobs/{id}", s.auth(s.deleteBlob))
-	return logRequests(mux)
+	return logRequests(cors(s.origins, mux))
 }
 
 // ---- recovery sealing ----
@@ -341,7 +351,11 @@ func (s *Server) me(w http.ResponseWriter, r *http.Request, h string) {
 		return
 	}
 	n, _ := s.store.CountEntries(r.Context(), h)
-	writeJSON(w, 200, map[string]any{"handle": a.Handle, "createdAt": a.CreatedAt, "entries": n, "recovery": a.Sealed != nil})
+	out := map[string]any{"handle": a.Handle, "createdAt": a.CreatedAt, "entries": n, "recovery": a.Sealed != nil}
+	if sess, _ := r.Context().Value(sessionKey{}).(*Session); sess != nil {
+		out["session"] = sess
+	}
+	writeJSON(w, 200, out)
 }
 
 func (s *Server) deleteMe(w http.ResponseWriter, r *http.Request, h string) {
@@ -477,6 +491,19 @@ func (s *Server) deleteBlob(w http.ResponseWriter, r *http.Request, h string) {
 
 // ---- auth: `Authorization: Tekkoh <handle> <base64 token>` ----
 
+// owner: only the journal's own token (derived from the journal key), not a
+// linked browser's session.
+func (s *Server) owner(next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
+	return s.auth(func(w http.ResponseWriter, r *http.Request, h string) {
+		if r.Context().Value(sessionKey{}) != nil {
+			fail(w, 403, "only your phone can do that")
+			return
+		}
+		next(w, r, h)
+	})
+}
+
+// auth: the journal's own token, or a linked browser's session token.
 func (s *Server) auth(next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f := strings.Fields(r.Header.Get("Authorization"))
@@ -496,8 +523,12 @@ func (s *Server) auth(next func(http.ResponseWriter, *http.Request, string)) htt
 		}
 		sum := sha256.Sum256(tok)
 		if subtle.ConstantTimeCompare(sum[:], a.AuthHash) != 1 {
-			fail(w, 401, "sign in")
-			return
+			sess, err := s.store.Session(r.Context(), a.Handle, sum[:])
+			if err != nil {
+				fail(w, 401, "sign in")
+				return
+			}
+			r = r.WithContext(context.WithValue(r.Context(), sessionKey{}, sess))
 		}
 		next(w, r, a.Handle)
 	}

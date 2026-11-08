@@ -424,3 +424,109 @@ func TestRecoveryIsRateLimitedPerIP(t *testing.T) {
 		t.Fatal("limited another key")
 	}
 }
+
+func TestPairingHandsOverOnceThroughTheOwner(t *testing.T) {
+	c, _, _ := newClient(t)
+	a := signUp(t, c, "pia")
+	code, out := c.do("POST", "/v1/pair", nil, "")
+	if code != 201 {
+		t.Fatalf("open: %d %v", code, out)
+	}
+	id := out["id"].(string)
+	if code, out := c.do("GET", "/v1/pair/"+id, nil, ""); code != 202 || out["waiting"] != true {
+		t.Fatalf("before the phone: %d %v", code, out)
+	}
+	box := enc(random(80))
+	if code, _ := c.do("PUT", "/v1/pair/"+id, map[string]any{"box": box}, ""); code != 401 {
+		t.Fatalf("filled without signing in: %d", code)
+	}
+	if code, _ := c.do("PUT", "/v1/pair/"+id, map[string]any{"box": box}, a.header); code != 200 {
+		t.Fatalf("fill: %d", code)
+	}
+	if code, _ := c.do("PUT", "/v1/pair/"+id, map[string]any{"box": enc(random(80))}, a.header); code != 409 {
+		t.Fatalf("refilled: %d", code)
+	}
+	code, out = c.do("GET", "/v1/pair/"+id, nil, "")
+	if code != 200 || out["box"] != box || out["handle"] != "pia" {
+		t.Fatalf("take: %d %v", code, out)
+	}
+	if code, _ := c.do("GET", "/v1/pair/"+id, nil, ""); code != 404 {
+		t.Fatalf("taken twice: %d", code)
+	}
+	if code, _ := c.do("PUT", "/v1/pair/nosuchslot1234567890", map[string]any{"box": box}, a.header); code != 404 {
+		t.Fatalf("unknown slot: %d", code)
+	}
+}
+
+func TestBrowserSessionsCanWriteButNotRuleTheJournal(t *testing.T) {
+	c, _, _ := newClient(t)
+	a := signUp(t, c, "rio")
+	code, out := c.do("POST", "/v1/sessions", map[string]any{"label": "Safari on a Mac"}, a.header)
+	if code != 201 {
+		t.Fatalf("create: %d %v", code, out)
+	}
+	browser := "Tekkoh rio " + out["token"].(string)
+	// A browser reads and writes.
+	if code, _ := c.do("PUT", "/v1/entries/abcdefghijklmnop1234", map[string]any{"data": enc([]byte("x")), "rev": 0}, browser); code != 200 {
+		t.Fatalf("browser write: %d", code)
+	}
+	if code, out := c.do("GET", "/v1/me", nil, browser); code != 200 || out["session"] == nil {
+		t.Fatalf("browser me: %d %v", code, out)
+	}
+	// But can't change the PIN, delete the journal, link or list browsers.
+	for _, req := range [][2]string{{"DELETE", "/v1/me"}, {"POST", "/v1/sessions"}, {"GET", "/v1/sessions"}} {
+		if code, _ := c.do(req[0], req[1], map[string]any{}, browser); code != 403 {
+			t.Fatalf("browser %s %s: %d", req[0], req[1], code)
+		}
+	}
+	if code := newPIN(t, c, browser, random(32)); code != 403 {
+		t.Fatalf("browser changed the PIN: %d", code)
+	}
+	// The phone sees it, and revoking it signs it out.
+	_, list := c.do("GET", "/v1/sessions", nil, a.header)
+	sessions := list["sessions"].([]any)
+	if len(sessions) != 1 || sessions[0].(map[string]any)["label"] != "Safari on a Mac" {
+		t.Fatalf("list: %v", list)
+	}
+	if code, _ := c.do("DELETE", "/v1/sessions/"+sessions[0].(map[string]any)["id"].(string), nil, a.header); code != 200 {
+		t.Fatalf("revoke: %d", code)
+	}
+	if code, _ := c.do("GET", "/v1/me", nil, browser); code != 401 {
+		t.Fatalf("revoked browser still in: %d", code)
+	}
+	// A browser can sign itself out, not another.
+	_, o2 := c.do("POST", "/v1/sessions", map[string]any{"label": "two"}, a.header)
+	_, o3 := c.do("POST", "/v1/sessions", map[string]any{"label": "three"}, a.header)
+	two, three := "Tekkoh rio "+o2["token"].(string), o3["id"].(string)
+	if code, _ := c.do("DELETE", "/v1/sessions/"+three, nil, two); code != 403 {
+		t.Fatalf("browser signed out another: %d", code)
+	}
+	if code, _ := c.do("DELETE", "/v1/sessions/current", nil, two); code != 200 {
+		t.Fatalf("sign self out: %d", code)
+	}
+	if code, _ := c.do("GET", "/v1/me", nil, two); code != 401 {
+		t.Fatalf("still in after signing out: %d", code)
+	}
+}
+
+func TestOnlyTheWebAppsOriginMayCallFromABrowser(t *testing.T) {
+	c, _, _ := newClient(t)
+	pre := func(origin string) *http.Response {
+		req, _ := http.NewRequest("OPTIONS", c.srv.URL+"/v1/entries", nil)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Access-Control-Request-Method", "GET")
+		req.Header.Set("Access-Control-Request-Headers", "authorization")
+		res, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res.Body.Close()
+		return res
+	}
+	if res := pre("https://tekkoh-web.cronbon.com"); res.StatusCode != 204 || res.Header.Get("Access-Control-Allow-Origin") != "https://tekkoh-web.cronbon.com" {
+		t.Fatalf("web app's origin: %d %v", res.StatusCode, res.Header)
+	}
+	if res := pre("https://evil.example"); res.Header.Get("Access-Control-Allow-Origin") != "" {
+		t.Fatalf("another origin allowed: %v", res.Header)
+	}
+}

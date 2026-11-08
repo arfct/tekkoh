@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sort"
@@ -37,6 +38,18 @@ type Entry struct {
 	Deleted   bool      `json:"deleted,omitempty"`
 }
 
+// A Session is a linked browser's own sign-in: it can read and write the
+// journal but not change the PIN, manage sessions or delete the account,
+// and the phone can revoke it.
+type Session struct {
+	ID        string    `json:"id"`
+	Handle    string    `json:"-"`
+	TokenHash []byte    `json:"-"`
+	Label     string    `json:"label"`
+	CreatedAt time.Time `json:"createdAt"`
+	LastUsed  time.Time `json:"lastUsed"`
+}
+
 var (
 	ErrNotFound = errors.New("not found")
 	ErrExists   = errors.New("already exists")
@@ -67,6 +80,13 @@ type Store interface {
 	// Usage is how many entries and photos an account has, and the photos' bytes.
 	Usage(ctx context.Context, handle string) (entries, blobs int, bytes int64, err error)
 
+	CreateSession(ctx context.Context, s *Session) error
+	// Session finds an account's session by its token's hash, and notes
+	// that it was used.
+	Session(ctx context.Context, handle string, tokenHash []byte) (*Session, error)
+	Sessions(ctx context.Context, handle string) ([]Session, error)
+	DeleteSession(ctx context.Context, handle, id string) error
+
 	PutBlob(ctx context.Context, handle, id string, data []byte) error
 	Blob(ctx context.Context, handle, id string) ([]byte, error)
 	DeleteBlob(ctx context.Context, handle, id string) error
@@ -80,10 +100,11 @@ type memStore struct {
 	entries  map[string]map[string]*Entry
 	blobs    map[string]map[string][]byte
 	seq      map[string]int64 // per account: changes are numbered per journal
+	sessions map[string]*Session
 }
 
 func newMemStore() *memStore {
-	return &memStore{accounts: map[string]*Account{}, entries: map[string]map[string]*Entry{}, blobs: map[string]map[string][]byte{}, seq: map[string]int64{}}
+	return &memStore{accounts: map[string]*Account{}, entries: map[string]map[string]*Entry{}, blobs: map[string]map[string][]byte{}, seq: map[string]int64{}, sessions: map[string]*Session{}}
 }
 
 func (m *memStore) CreateAccount(_ context.Context, a *Account) error {
@@ -154,6 +175,11 @@ func (m *memStore) DeleteAccount(_ context.Context, handle string) error {
 	delete(m.accounts, handle)
 	delete(m.entries, handle)
 	delete(m.blobs, handle)
+	for id, s := range m.sessions {
+		if s.Handle == handle {
+			delete(m.sessions, id)
+		}
+	}
 	return nil
 }
 
@@ -221,6 +247,49 @@ func (m *memStore) CountEntries(_ context.Context, handle string) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+func (m *memStore) CreateSession(_ context.Context, s *Session) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	c := *s
+	m.sessions[s.ID] = &c
+	return nil
+}
+
+func (m *memStore) Session(_ context.Context, handle string, tokenHash []byte) (*Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, s := range m.sessions {
+		if s.Handle == handle && bytes.Equal(s.TokenHash, tokenHash) {
+			s.LastUsed = time.Now().UTC()
+			c := *s
+			return &c, nil
+		}
+	}
+	return nil, ErrNotFound
+}
+
+func (m *memStore) Sessions(_ context.Context, handle string) ([]Session, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var out []Session
+	for _, s := range m.sessions {
+		if s.Handle == handle {
+			out = append(out, *s)
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt.Before(out[j].CreatedAt) })
+	return out, nil
+}
+
+func (m *memStore) DeleteSession(_ context.Context, handle, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if s, ok := m.sessions[id]; ok && s.Handle == handle {
+		delete(m.sessions, id)
+	}
+	return nil
 }
 
 func (m *memStore) Usage(_ context.Context, handle string) (int, int, int64, error) {

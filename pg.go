@@ -39,6 +39,14 @@ create index if not exists entries_seq on entries (handle, seq);
 alter table accounts add column if not exists next_seq bigint not null default 0;
 alter table accounts add column if not exists last_attempt timestamptz;
 update accounts a set next_seq = coalesce((select max(seq) from entries e where e.handle = a.handle), 0) where next_seq = 0;
+create table if not exists sessions (
+  id         text primary key,
+  handle     text not null references accounts(handle) on delete cascade,
+  token_hash bytea not null unique,
+  label      text not null default '',
+  created_at timestamptz not null default now(),
+  last_used  timestamptz not null default now()
+);
 create table if not exists blobs (
   handle     text not null references accounts(handle) on delete cascade,
   id         text not null,
@@ -207,6 +215,44 @@ func (p *pgStore) Usage(ctx context.Context, handle string) (entries, blobs int,
 	err = p.db.QueryRowContext(ctx, `select (select count(*) from entries where handle = $1),
 		(select count(*) from blobs where handle = $1), (select coalesce(sum(length(data)), 0) from blobs where handle = $1)`, handle).Scan(&entries, &blobs, &bytes)
 	return
+}
+
+func (p *pgStore) CreateSession(ctx context.Context, s *Session) error {
+	_, err := p.db.ExecContext(ctx, `insert into sessions (id, handle, token_hash, label) values ($1, $2, $3, $4)`, s.ID, s.Handle, s.TokenHash, s.Label)
+	return err
+}
+
+func (p *pgStore) Session(ctx context.Context, handle string, tokenHash []byte) (*Session, error) {
+	s := &Session{Handle: handle, TokenHash: tokenHash}
+	// Noting the use at most every few minutes keeps reads from writing.
+	err := p.db.QueryRowContext(ctx, `update sessions set last_used = case when last_used < now() - interval '5 minutes' then now() else last_used end
+		where handle = $1 and token_hash = $2 returning id, label, created_at, last_used`, handle, tokenHash).Scan(&s.ID, &s.Label, &s.CreatedAt, &s.LastUsed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	return s, err
+}
+
+func (p *pgStore) Sessions(ctx context.Context, handle string) ([]Session, error) {
+	rows, err := p.db.QueryContext(ctx, `select id, label, created_at, last_used from sessions where handle = $1 order by created_at`, handle)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Session
+	for rows.Next() {
+		s := Session{Handle: handle}
+		if err := rows.Scan(&s.ID, &s.Label, &s.CreatedAt, &s.LastUsed); err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func (p *pgStore) DeleteSession(ctx context.Context, handle, id string) error {
+	_, err := p.db.ExecContext(ctx, `delete from sessions where handle = $1 and id = $2`, handle, id)
+	return err
 }
 
 func (p *pgStore) PutBlob(ctx context.Context, handle, id string, data []byte) error {
