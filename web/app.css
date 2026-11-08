@@ -303,3 +303,17 @@ dl { display: grid; grid-template-columns: auto 1fr; gap: 8px 18px; margin: 0 0 
 dt { font: 500 10px var(--mono); letter-spacing: 0.15em; text-transform: uppercase; color: var(--muted); padding-top: 4px; }
 dd { margin: 0; }
 .fine { color: var(--muted); font-size: 14px; }
+
+/* A phone-width window: one page, in the app's order (date, margin,
+   writing, then photos), the pages' parts laid out as one column. */
+@media (max-width: 899px) {
+  .spread { display: flex; flex-direction: column; }
+  .page { display: contents; }
+  .date, .margin, .shelf { margin-left: 20px; margin-right: 20px; }
+  .date { order: 1; }
+  .margin { order: 2; }
+  .page.right .writing { order: 3; margin: 0 8px; }
+  .shelf { order: 4; }
+}
+
+.month .cell { width: 52px; justify-self: center; }
