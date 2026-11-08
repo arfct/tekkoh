@@ -41,7 +41,9 @@ func main() {
 	if port == "" {
 		port = "8080"
 	}
-	srv := &http.Server{Addr: "0.0.0.0:" + port, Handler: NewServer(store, secret).Routes(), ReadHeaderTimeout: 10 * time.Second}
+	srv := &http.Server{Addr: "0.0.0.0:" + port, Handler: NewServer(store, secret).Routes(),
+		// A slow client can't hold a connection (and a photo's buffer) for long.
+		ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 2 * time.Minute, WriteTimeout: 2 * time.Minute, IdleTimeout: 2 * time.Minute}
 	go func() {
 		<-ctx.Done()
 		c, cancel := context.WithTimeout(context.Background(), 5*time.Second)

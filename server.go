@@ -30,7 +30,23 @@ const (
 	MinIterations = 200_000
 	maxEntry      = 2 << 20  // 2 MB of encrypted text and metadata
 	maxBlob       = 12 << 20 // 12 MB encrypted photo
+	// Per journal: a page a day for decades, and a lot of photos.
+	maxEntries   = 40_000
+	maxBlobs     = 60_000
+	maxBlobBytes = 20 << 30
+	// Failed recoveries allowed across every account in an hour: guessing
+	// a few common PINs against many usernames runs into this.
+	maxFailuresPerHour = 200
 )
+
+// backoff is how long to wait after the nth wrong PIN before the next
+// try: none for the first three, then 1, 2, 4… minutes, so ten take hours.
+var backoff = func(attempts int) time.Duration {
+	if attempts < 3 {
+		return 0
+	}
+	return time.Minute << (attempts - 3)
+}
 
 var (
 	handleRE = regexp.MustCompile(`^[a-z0-9][a-z0-9_.-]{2,29}$`)
@@ -41,10 +57,15 @@ type Server struct {
 	store  Store
 	secret []byte // TEKKOH_SECRET: seals recovery keys, keys the verifier MACs
 	limit  *limiter
+	// Failures across all accounts, and per-username counts for names
+	// that don't exist (so they answer like ones that do).
+	failures *limiter
+	ghosts   *limiter
 }
 
 func NewServer(store Store, secret []byte) *Server {
-	return &Server{store: store, secret: secret, limit: newLimiter(20, time.Hour)}
+	return &Server{store: store, secret: secret, limit: newLimiter(20, time.Hour),
+		failures: newLimiter(maxFailuresPerHour, time.Hour), ghosts: newLimiter(MaxAttempts, 24*time.Hour)}
 }
 
 func (s *Server) Routes() http.Handler {
@@ -54,8 +75,11 @@ func (s *Server) Routes() http.Handler {
 		w.Header().Set("content-type", "text/plain; charset=utf-8")
 		io.WriteString(w, "Tekkoh: an encrypted daily journal. This server only ever sees ciphertext.\n")
 	})
+	mux.HandleFunc("GET /v1/transport-key", func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 200, map[string]any{"key": b64(s.TransportPublic())})
+	})
 	mux.HandleFunc("POST /v1/accounts", s.createAccount)
-	mux.HandleFunc("GET /v1/recovery", s.recoveryParams)
+	mux.HandleFunc("POST /v1/recovery/params", s.recoveryParams)
 	mux.HandleFunc("POST /v1/recovery", s.recover)
 	mux.HandleFunc("PUT /v1/recovery", s.auth(s.setRecovery))
 	mux.HandleFunc("GET /v1/me", s.auth(s.me))
@@ -137,11 +161,16 @@ func (r recoveryBody) valid() error {
 
 func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Handle   string       `json:"handle"`
-		Auth     b64          `json:"auth"`
-		Recovery recoveryBody `json:"recovery"`
+		Handle   string    `json:"handle"`
+		Auth     b64       `json:"auth"`
+		Recovery sealedBox `json:"recovery"`
 	}
 	if !readJSON(w, r, &body, 16<<10) {
+		return
+	}
+	var rec recoveryBody
+	if _, err := s.open("create", body.Recovery, &rec); err != nil {
+		fail(w, 400, "recovery: "+err.Error())
 		return
 	}
 	h := strings.ToLower(strings.TrimSpace(body.Handle))
@@ -153,7 +182,7 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 		fail(w, 400, "auth must be 32 bytes")
 		return
 	}
-	if err := body.Recovery.valid(); err != nil {
+	if err := rec.valid(); err != nil {
 		fail(w, 400, err.Error())
 		return
 	}
@@ -163,8 +192,8 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	sum := sha256.Sum256(body.Auth)
 	a := &Account{
-		Handle: h, AuthHash: sum[:], Salt: body.Recovery.Salt, Iterations: body.Recovery.Iterations,
-		VerifierMAC: s.verifierMAC(h, body.Recovery.Verifier), Sealed: s.seal(h, body.Recovery.Blob),
+		Handle: h, AuthHash: sum[:], Salt: rec.Salt, Iterations: rec.Iterations,
+		VerifierMAC: s.verifierMAC(h, rec.Verifier), Sealed: s.seal(h, rec.Blob),
 	}
 	if err := s.store.CreateAccount(r.Context(), a); err != nil {
 		if errors.Is(err, ErrExists) {
@@ -179,14 +208,22 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 
 // recoveryParams gives a new phone what it needs to stretch the PIN.
 func (s *Server) recoveryParams(w http.ResponseWriter, r *http.Request) {
-	h := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("handle")))
+	// In the body, so the username stays out of access logs.
+	var body struct {
+		Handle string `json:"handle"`
+	}
+	if !readJSON(w, r, &body, 4<<10) {
+		return
+	}
+	h := strings.ToLower(strings.TrimSpace(body.Handle))
 	if !s.limit.allow("params:" + clientIP(r)) {
 		fail(w, 429, "too many tries; wait a while")
 		return
 	}
 	a, err := s.store.Account(r.Context(), h)
 	if errors.Is(err, ErrNotFound) {
-		fail(w, 404, "no journal with that username")
+		// Answer as if it existed, so usernames can't be listed.
+		writeJSON(w, 200, map[string]any{"salt": b64(s.ghostSalt(h)), "iterations": 600_000, "attemptsLeft": MaxAttempts - s.ghosts.count(h)})
 		return
 	} else if err != nil {
 		serverError(w, err)
@@ -201,34 +238,57 @@ func (s *Server) recoveryParams(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) recover(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Handle   string `json:"handle"`
-		Verifier b64    `json:"verifier"`
+		Handle string    `json:"handle"`
+		Proof  sealedBox `json:"proof"`
 	}
 	if !readJSON(w, r, &body, 4<<10) {
 		return
 	}
 	h := strings.ToLower(strings.TrimSpace(body.Handle))
-	if !s.limit.allow("recover:" + clientIP(r)) {
+	var proof struct {
+		Verifier b64 `json:"verifier"`
+	}
+	k, err := s.open("recover", body.Proof, &proof)
+	if err != nil {
+		fail(w, 400, err.Error())
+		return
+	}
+	if !s.limit.allow("recover:"+clientIP(r)) || s.failures.count("all") >= maxFailuresPerHour {
 		fail(w, 429, "too many tries; wait a while")
 		return
 	}
-	mac := s.verifierMAC(h, body.Verifier)
+	mac := s.verifierMAC(h, proof.Verifier)
+	var wait time.Duration
 	a, ok, err := s.store.Attempt(r.Context(), h, func(a *Account) bool {
+		wait = time.Until(a.LastAttempt.Add(backoff(a.Attempts)))
+		return wait <= 0
+	}, func(a *Account) bool {
 		return subtle.ConstantTimeCompare(mac, a.VerifierMAC) == 1
 	}, MaxAttempts)
-	if errors.Is(err, ErrNotFound) {
-		fail(w, 404, "no journal with that username")
+	switch {
+	case errors.Is(err, ErrNotFound):
+		// Like a wrong PIN on a real journal, counting down the same way.
+		s.failures.allow("all")
+		if !s.ghosts.allow(h) {
+			fail(w, 410, wiped)
+			return
+		}
+		writeJSON(w, 403, map[string]any{"error": "wrong PIN", "attemptsLeft": MaxAttempts - s.ghosts.count(h)})
 		return
-	} else if err != nil {
+	case errors.Is(err, ErrTooSoon):
+		writeJSON(w, 429, map[string]any{"error": "too many wrong PINs; wait before trying again", "retryAfter": int(wait.Seconds()) + 1})
+		return
+	case err != nil:
 		serverError(w, err)
 		return
 	}
 	if !ok {
+		s.failures.allow("all")
 		if a.Sealed == nil {
-			fail(w, 410, "too many wrong PINs: this journal can only be opened on a device that still has its key")
+			fail(w, 410, wiped)
 			return
 		}
-		writeJSON(w, 403, map[string]any{"error": "wrong PIN", "attemptsLeft": MaxAttempts - a.Attempts})
+		writeJSON(w, 403, map[string]any{"error": "wrong PIN", "attemptsLeft": MaxAttempts - a.Attempts, "retryAfter": int(backoff(a.Attempts).Seconds())})
 		return
 	}
 	blob, err := s.unseal(h, a.Sealed)
@@ -236,12 +296,31 @@ func (s *Server) recover(w http.ResponseWriter, r *http.Request) {
 		serverError(w, errors.New("sealed key doesn't open: has TEKKOH_SECRET changed?"))
 		return
 	}
-	writeJSON(w, 200, map[string]any{"blob": b64(blob)})
+	reply, err := sealReply(k, "recover", map[string]any{"blob": b64(blob)})
+	if err != nil {
+		serverError(w, err)
+		return
+	}
+	writeJSON(w, 200, map[string]any{"reply": reply})
+}
+
+const wiped = "too many wrong PINs: this journal can only be opened on a device that still has its key"
+
+// ghostSalt is a stable salt for a username that doesn't exist.
+func (s *Server) ghostSalt(handle string) []byte {
+	m := hmac.New(sha256.New, s.derive("tekkoh/ghost-salt/v1"))
+	m.Write([]byte(handle))
+	return m.Sum(nil)[:16]
 }
 
 func (s *Server) setRecovery(w http.ResponseWriter, r *http.Request, h string) {
+	var box sealedBox
+	if !readJSON(w, r, &box, 16<<10) {
+		return
+	}
 	var body recoveryBody
-	if !readJSON(w, r, &body, 16<<10) {
+	if _, err := s.open("set-recovery", box, &body); err != nil {
+		fail(w, 400, err.Error())
 		return
 	}
 	if err := body.valid(); err != nil {
@@ -314,6 +393,12 @@ func (s *Server) putEntry(w http.ResponseWriter, r *http.Request, h string) {
 		fail(w, 400, "entry is empty or too big")
 		return
 	}
+	if body.Rev == 0 {
+		if n, _, _, err := s.store.Usage(r.Context(), h); err == nil && n >= maxEntries {
+			fail(w, 507, "this journal is full")
+			return
+		}
+	}
 	e, err := s.store.PutEntry(r.Context(), h, id, body.Data, body.Rev)
 	if errors.Is(err, ErrConflict) {
 		fail(w, 409, "changed elsewhere; sync and try again")
@@ -355,6 +440,10 @@ func (s *Server) putBlob(w http.ResponseWriter, r *http.Request, h string) {
 	}
 	if len(data) == 0 {
 		fail(w, 400, "empty")
+		return
+	}
+	if _, n, bytes, err := s.store.Usage(r.Context(), h); err == nil && (n >= maxBlobs || bytes+int64(len(data)) > maxBlobBytes) {
+		fail(w, 507, "no more room for photos in this journal")
 		return
 	}
 	if err := s.store.PutBlob(r.Context(), h, id, data); err != nil {
@@ -454,13 +543,32 @@ func serverError(w http.ResponseWriter, err error) {
 	fail(w, 500, "something went wrong")
 }
 
+// clientIP is who's asking, for rate limits. A client can put anything in
+// X-Forwarded-For and the proxies append to it, so the first hop is
+// whatever an attacker likes. Cloudflare sets Cf-Connecting-Ip itself
+// (replacing any the client sent) when requests come through the tunnel;
+// otherwise the last hop, which the proxy in front of us added, is the one
+// to believe.
 func clientIP(r *http.Request) string {
-	// Berth's proxy (Caddy) sets X-Forwarded-For; the first hop is the client.
+	if ip := strings.TrimSpace(r.Header.Get("Cf-Connecting-Ip")); ip != "" {
+		return ipKey(ip)
+	}
 	if f := r.Header.Get("X-Forwarded-For"); f != "" {
-		return strings.TrimSpace(strings.Split(f, ",")[0])
+		hops := strings.Split(f, ",")
+		return ipKey(strings.TrimSpace(hops[len(hops)-1]))
 	}
 	host, _, _ := net.SplitHostPort(r.RemoteAddr)
 	return host
+}
+
+// ipKey groups IPv6 addresses by /64: a host usually has a whole /64 to
+// rotate through.
+func ipKey(ip string) string {
+	a := net.ParseIP(ip)
+	if a == nil || a.To4() != nil {
+		return ip
+	}
+	return a.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 func logRequests(h http.Handler) http.Handler {
@@ -486,16 +594,38 @@ type limiter struct {
 	n      int
 	window time.Duration
 	hits   map[string][]time.Time
+	calls  int
 }
 
 func newLimiter(n int, window time.Duration) *limiter {
 	return &limiter{n: n, window: window, hits: map[string][]time.Time{}}
 }
 
+// count is how many events key has had in the window.
+func (l *limiter) count(key string) int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, t := range l.hits[key] {
+		if time.Since(t) <= l.window {
+			n++
+		}
+	}
+	return n
+}
+
 func (l *limiter) allow(key string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	now := time.Now()
+	// Now and then, forget keys that have gone quiet.
+	if l.calls++; l.calls%1000 == 0 {
+		for k, h := range l.hits {
+			if len(h) == 0 || now.Sub(h[len(h)-1]) > l.window {
+				delete(l.hits, k)
+			}
+		}
+	}
 	h := l.hits[key]
 	i := 0
 	for i < len(h) && now.Sub(h[i]) > l.window {

@@ -22,9 +22,10 @@ type Account struct {
 	VerifierMAC []byte
 	// Sealed is the journal key, locked with the PIN on the phone and then
 	// sealed again here with the server secret. nil once wiped.
-	Sealed    []byte
-	Attempts  int
-	CreatedAt time.Time
+	Sealed      []byte
+	Attempts    int
+	LastAttempt time.Time // the last wrong PIN, for backing off
+	CreatedAt   time.Time
 }
 
 type Entry struct {
@@ -40,6 +41,9 @@ var (
 	ErrNotFound = errors.New("not found")
 	ErrExists   = errors.New("already exists")
 	ErrConflict = errors.New("conflict")
+	// ErrTooSoon: a recovery attempt before the backoff after the last
+	// wrong PIN has passed. It doesn't count.
+	ErrTooSoon = errors.New("too soon")
 )
 
 type Store interface {
@@ -48,7 +52,9 @@ type Store interface {
 	// Attempt records a recovery attempt under a lock: check says whether the
 	// PIN matched; on a miss the count goes up and, at max, the sealed key is
 	// wiped. It returns the account as it stands after.
-	Attempt(ctx context.Context, handle string, check func(*Account) bool, max int) (*Account, bool, error)
+	// ready decides, under the same lock, whether an attempt may be made
+	// now at all (ErrTooSoon if not).
+	Attempt(ctx context.Context, handle string, ready func(*Account) bool, check func(*Account) bool, max int) (*Account, bool, error)
 	SetRecovery(ctx context.Context, handle string, salt []byte, iterations int, verifierMAC, sealed []byte) error
 	DeleteAccount(ctx context.Context, handle string) error
 
@@ -58,6 +64,8 @@ type Store interface {
 	// Entries returns changes after seq, oldest first.
 	Entries(ctx context.Context, handle string, after int64, limit int) ([]Entry, error)
 	CountEntries(ctx context.Context, handle string) (int, error)
+	// Usage is how many entries and photos an account has, and the photos' bytes.
+	Usage(ctx context.Context, handle string) (entries, blobs int, bytes int64, err error)
 
 	PutBlob(ctx context.Context, handle, id string, data []byte) error
 	Blob(ctx context.Context, handle, id string) ([]byte, error)
@@ -71,11 +79,11 @@ type memStore struct {
 	accounts map[string]*Account
 	entries  map[string]map[string]*Entry
 	blobs    map[string]map[string][]byte
-	seq      int64
+	seq      map[string]int64 // per account: changes are numbered per journal
 }
 
 func newMemStore() *memStore {
-	return &memStore{accounts: map[string]*Account{}, entries: map[string]map[string]*Entry{}, blobs: map[string]map[string][]byte{}}
+	return &memStore{accounts: map[string]*Account{}, entries: map[string]map[string]*Entry{}, blobs: map[string]map[string][]byte{}, seq: map[string]int64{}}
 }
 
 func (m *memStore) CreateAccount(_ context.Context, a *Account) error {
@@ -100,7 +108,7 @@ func (m *memStore) Account(_ context.Context, handle string) (*Account, error) {
 	return &c, nil
 }
 
-func (m *memStore) Attempt(_ context.Context, handle string, check func(*Account) bool, max int) (*Account, bool, error) {
+func (m *memStore) Attempt(_ context.Context, handle string, ready func(*Account) bool, check func(*Account) bool, max int) (*Account, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	a, ok := m.accounts[handle]
@@ -111,12 +119,17 @@ func (m *memStore) Attempt(_ context.Context, handle string, check func(*Account
 		c := *a
 		return &c, false, nil
 	}
+	if !ready(a) {
+		c := *a
+		return &c, false, ErrTooSoon
+	}
 	if check(a) {
 		a.Attempts = 0
 		c := *a
 		return &c, true, nil
 	}
 	a.Attempts++
+	a.LastAttempt = time.Now()
 	if a.Attempts >= max {
 		a.Sealed = nil
 	}
@@ -159,8 +172,8 @@ func (m *memStore) PutEntry(_ context.Context, handle, id string, data []byte, r
 	if cur != rev {
 		return nil, ErrConflict
 	}
-	m.seq++
-	e := &Entry{ID: id, Data: data, Rev: rev + 1, Seq: m.seq, UpdatedAt: time.Now().UTC()}
+	m.seq[handle]++
+	e := &Entry{ID: id, Data: data, Rev: rev + 1, Seq: m.seq[handle], UpdatedAt: time.Now().UTC()}
 	es[id] = e
 	c := *e
 	return &c, nil
@@ -176,8 +189,8 @@ func (m *memStore) DeleteEntry(_ context.Context, handle, id string, rev int) (*
 	if e.Rev != rev {
 		return nil, ErrConflict
 	}
-	m.seq++
-	*e = Entry{ID: id, Rev: rev + 1, Seq: m.seq, UpdatedAt: time.Now().UTC(), Deleted: true}
+	m.seq[handle]++
+	*e = Entry{ID: id, Rev: rev + 1, Seq: m.seq[handle], UpdatedAt: time.Now().UTC(), Deleted: true}
 	c := *e
 	return &c, nil
 }
@@ -208,6 +221,16 @@ func (m *memStore) CountEntries(_ context.Context, handle string) (int, error) {
 		}
 	}
 	return n, nil
+}
+
+func (m *memStore) Usage(_ context.Context, handle string) (int, int, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	var bytes int64
+	for _, b := range m.blobs[handle] {
+		bytes += int64(len(b))
+	}
+	return len(m.entries[handle]), len(m.blobs[handle]), bytes, nil
 }
 
 func (m *memStore) PutBlob(_ context.Context, handle, id string, data []byte) error {

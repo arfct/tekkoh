@@ -33,7 +33,12 @@ create table if not exists entries (
   primary key (handle, id)
 );
 create index if not exists entries_seq on entries (handle, seq);
-create sequence if not exists entry_seq;
+-- Changes are numbered per journal, so one account's cursor says nothing
+-- about how much anyone else writes. (Earlier versions used one global
+-- sequence; the column starts each account above what it already has.)
+alter table accounts add column if not exists next_seq bigint not null default 0;
+alter table accounts add column if not exists last_attempt timestamptz;
+update accounts a set next_seq = coalesce((select max(seq) from entries e where e.handle = a.handle), 0) where next_seq = 0;
 create table if not exists blobs (
   handle     text not null references accounts(handle) on delete cascade,
   id         text not null,
@@ -72,20 +77,22 @@ func (p *pgStore) CreateAccount(ctx context.Context, a *Account) error {
 
 func scanAccount(row interface{ Scan(...any) error }) (*Account, error) {
 	a := &Account{}
-	err := row.Scan(&a.Handle, &a.AuthHash, &a.Salt, &a.Iterations, &a.VerifierMAC, &a.Sealed, &a.Attempts, &a.CreatedAt)
+	var last sql.NullTime
+	err := row.Scan(&a.Handle, &a.AuthHash, &a.Salt, &a.Iterations, &a.VerifierMAC, &a.Sealed, &a.Attempts, &last, &a.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
+	a.LastAttempt = last.Time
 	return a, err
 }
 
-const accountCols = `handle, auth_hash, salt, iterations, verifier_mac, sealed, attempts, created_at`
+const accountCols = `handle, auth_hash, salt, iterations, verifier_mac, sealed, attempts, last_attempt, created_at`
 
 func (p *pgStore) Account(ctx context.Context, handle string) (*Account, error) {
 	return scanAccount(p.db.QueryRowContext(ctx, `select `+accountCols+` from accounts where handle = $1`, handle))
 }
 
-func (p *pgStore) Attempt(ctx context.Context, handle string, check func(*Account) bool, max int) (*Account, bool, error) {
+func (p *pgStore) Attempt(ctx context.Context, handle string, ready func(*Account) bool, check func(*Account) bool, max int) (*Account, bool, error) {
 	tx, err := p.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, false, err
@@ -99,16 +106,21 @@ func (p *pgStore) Attempt(ctx context.Context, handle string, check func(*Accoun
 	if a.Sealed == nil {
 		return a, false, tx.Commit()
 	}
+	if !ready(a) {
+		return a, false, ErrTooSoon
+	}
 	ok := check(a)
 	if ok {
 		a.Attempts = 0
 	} else {
 		a.Attempts++
+		a.LastAttempt = time.Now()
 		if a.Attempts >= max {
 			a.Sealed = nil
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `update accounts set attempts = $2, sealed = $3 where handle = $1`, handle, a.Attempts, a.Sealed); err != nil {
+	if _, err := tx.ExecContext(ctx, `update accounts set attempts = $2, sealed = $3, last_attempt = $4 where handle = $1`,
+		handle, a.Attempts, a.Sealed, sql.NullTime{Time: a.LastAttempt, Valid: !a.LastAttempt.IsZero()}); err != nil {
 		return nil, false, err
 	}
 	return a, ok, tx.Commit()
@@ -135,10 +147,11 @@ func (p *pgStore) PutEntry(ctx context.Context, handle, id string, data []byte, 
 	e := &Entry{ID: id}
 	var err error
 	if rev == 0 {
-		err = p.db.QueryRowContext(ctx, `insert into entries (handle, id, data, rev, seq) values ($1, $2, $3, 1, nextval('entry_seq'))
-			on conflict (handle, id) do nothing returning rev, seq, updated_at`, handle, id, data).Scan(&e.Rev, &e.Seq, &e.UpdatedAt)
+		err = p.db.QueryRowContext(ctx, nextSeq+` insert into entries (handle, id, data, rev, seq)
+			select $1, $2, $3, 1, n.next_seq from n where not exists (select 1 from entries where handle = $1 and id = $2)
+			returning rev, seq, updated_at`, handle, id, data).Scan(&e.Rev, &e.Seq, &e.UpdatedAt)
 	} else {
-		err = p.db.QueryRowContext(ctx, `update entries set data = $3, rev = rev + 1, seq = nextval('entry_seq'), updated_at = now(), deleted = false
+		err = p.db.QueryRowContext(ctx, nextSeq+` update entries set data = $3, rev = rev + 1, seq = (select next_seq from n), updated_at = now(), deleted = false
 			where handle = $1 and id = $2 and rev = $4 returning rev, seq, updated_at`, handle, id, data, rev).Scan(&e.Rev, &e.Seq, &e.UpdatedAt)
 	}
 	if errors.Is(err, sql.ErrNoRows) {
@@ -149,7 +162,7 @@ func (p *pgStore) PutEntry(ctx context.Context, handle, id string, data []byte, 
 
 func (p *pgStore) DeleteEntry(ctx context.Context, handle, id string, rev int) (*Entry, error) {
 	e := &Entry{ID: id, Deleted: true}
-	err := p.db.QueryRowContext(ctx, `update entries set data = null, deleted = true, rev = rev + 1, seq = nextval('entry_seq'), updated_at = now()
+	err := p.db.QueryRowContext(ctx, nextSeq+` update entries set data = null, deleted = true, rev = rev + 1, seq = (select next_seq from n), updated_at = now()
 		where handle = $1 and id = $2 and rev = $3 returning rev, seq, updated_at`, handle, id, rev).Scan(&e.Rev, &e.Seq, &e.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		var exists bool
@@ -184,6 +197,16 @@ func (p *pgStore) CountEntries(ctx context.Context, handle string) (int, error) 
 	var n int
 	err := p.db.QueryRowContext(ctx, `select count(*) from entries where handle = $1 and not deleted`, handle).Scan(&n)
 	return n, err
+}
+
+// nextSeq numbers a change within its journal ($1 is the handle): a WITH
+// clause, n, in front of the statement that uses it.
+const nextSeq = `with n as (update accounts set next_seq = next_seq + 1 where handle = $1 returning next_seq)`
+
+func (p *pgStore) Usage(ctx context.Context, handle string) (entries, blobs int, bytes int64, err error) {
+	err = p.db.QueryRowContext(ctx, `select (select count(*) from entries where handle = $1),
+		(select count(*) from blobs where handle = $1), (select coalesce(sum(length(data)), 0) from blobs where handle = $1)`, handle).Scan(&entries, &blobs, &bytes)
+	return
 }
 
 func (p *pgStore) PutBlob(ctx context.Context, handle, id string, data []byte) error {
