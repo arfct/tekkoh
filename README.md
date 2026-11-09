@@ -27,7 +27,7 @@ leaves the phone unencrypted.
      key and the verifier at sign-up, boxed to this server's X25519 key
      (derived from `TEKKOH_SECRET`, built into the app; see `transport.go`)
      so nothing in between can read them.
-  3. The server stores an HMAC of the verifier and seals the locked key
+  3. The server stores an HMAC of the verifier and encrypts the locked key
      again (AES-GCM), both under `TEKKOH_SECRET`, which lives in Berth's
      config, not the database.
   4. To recover, a phone stretches the PIN again and sends the verifier. The
@@ -47,7 +47,7 @@ offline. See the app's SECURITY.md for the full picture.
 `web/` is Tekkoh in a browser, deployed as its own Berth app
 (`berth create tekkoh-web --repo arfct/tekkoh --path web`) at
 https://tekkoh-web.cronbon.com: static files behind Caddy with a strict
-Content-Security-Policy, the crypto in WebCrypto, pages sealed in
+Content-Security-Policy, the crypto in WebCrypto, pages encrypted in
 IndexedDB. A browser links with the username, the PIN and the phone (a QR
 code with a one-time X25519 key); it gets its own session, which the phone
 can revoke. Tests: `node web/tests/vectors.mjs` (crypto against the
@@ -133,7 +133,7 @@ and `TEKKOH_SERVER_KEY` to run it against another server.
 | `DELETE /v1/entries/:id?rev=` | leaves a tombstone for other devices |
 | `PUT/GET/DELETE /v1/blobs/:id` | encrypted photo bytes |
 | `POST /v1/pair` | a browser opens a linking slot: `{id, expiresIn}`; `{"for": "agent"}` for an agent's, which lasts 15 minutes |
-| `PUT /v1/pair/:id` | (the phone) `{box}`: the journal key sealed to the browser |
+| `PUT /v1/pair/:id` | (the phone) `{box}`: the journal key encrypted to the browser |
 | `GET /v1/pair/:id` | the browser collects it once: `{box, handle}`, or 202 while waiting |
 | `GET /v1/pair/:id/state` | (any origin) how a link is getting on, for its page: `waiting`, `approved`, `linked` or `expired` |
 | `POST /v1/sessions`, `GET /v1/sessions` | (the phone) link a browser's or agent's session (`kind`: `browser` or `agent`); list them |
