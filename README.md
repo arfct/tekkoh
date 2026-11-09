@@ -1,6 +1,6 @@
 # tekkoh-berth
 
-The server for [Tekkoh](https://github.com/dps/tekkoh-ios), an encrypted
+The server for [Tekkoh](https://github.com/arfct/tekkoh-ios), an encrypted
 daily journal. It stores accounts, entries and photos, and gives a new phone
 its journal key back for the right PIN. Everything a person writes is
 encrypted on their phone first: the server holds ciphertext it can't read.
@@ -45,7 +45,7 @@ offline. See the app's SECURITY.md for the full picture.
 ## The web app
 
 `web/` is Tekkoh in a browser, deployed as its own Berth app
-(`berth create tekkoh-web --repo dps/tekkoh-berth --path web`) at
+(`berth create tekkoh-web --repo arfct/tekkoh --path web`) at
 https://tekkoh-web.cronbon.com: static files behind Caddy with a strict
 Content-Security-Policy, the crypto in WebCrypto, pages sealed in
 IndexedDB. A browser links with the username, the PIN and the phone (a QR
@@ -152,10 +152,15 @@ go test ./...
 On Berth:
 
 ```sh
-berth create tekkoh --repo dps/tekkoh-berth
+berth create tekkoh --repo arfct/tekkoh
 berth pg:create tekkoh-db && berth pg:link tekkoh-db tekkoh
 berth config:set tekkoh TEKKOH_SECRET=$(openssl rand -base64 32)
 ```
 
 Changing `TEKKOH_SECRET` makes every stored PIN recovery unusable (devices
 can set new PINs); keep it with Berth's backups.
+
+## License
+
+MIT; see [LICENSE](LICENSE). `web/vendor/qrcode.js` is Kazuhiko Arase's QR
+code generator, also MIT, with its notice kept in the file.

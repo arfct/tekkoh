@@ -1,4 +1,4 @@
-module github.com/dps/tekkoh-berth
+module github.com/arfct/tekkoh
 
 go 1.26.0
 
