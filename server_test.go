@@ -458,6 +458,16 @@ func TestPairingHandsOverOnceThroughTheOwner(t *testing.T) {
 	}
 }
 
+func TestAnAgentsLinkWaitsLongerThanABrowsers(t *testing.T) {
+	c, _, _ := newClient(t)
+	if code, out := c.do("POST", "/v1/pair", nil, ""); code != 201 || out["expiresIn"] != float64(300) {
+		t.Fatalf("browser: %d %v", code, out)
+	}
+	if code, out := c.do("POST", "/v1/pair", map[string]any{"for": "agent"}, ""); code != 201 || out["expiresIn"] != float64(900) {
+		t.Fatalf("agent: %d %v", code, out)
+	}
+}
+
 func TestBrowserSessionsCanWriteButNotRuleTheJournal(t *testing.T) {
 	c, _, _ := newClient(t)
 	a := signUp(t, c, "rio")

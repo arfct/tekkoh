@@ -23,8 +23,13 @@ import (
 
 const usage = `tekkoh: your Tekkoh journal, for an agent working on your behalf.
 
-Linking (once, with you there: it needs your username, PIN and phone):
-  tekkoh link [--name NAME]          link this machine as an agent
+Linking (once; the person approves it on their phone):
+  tekkoh link [--name NAME]          print a one-time link to send them; on
+                                     their iPhone it opens Tekkoh to approve
+  tekkoh link --wait [--timeout 90s] finish once they've approved; run it
+                                     again if it times out
+  tekkoh link --pin [--name NAME]    or, in a terminal they type into: their
+                                     username, PIN, and a code to scan
   tekkoh status                      which journal, as which agent
   tekkoh unlink                      sign out and forget the key here
 
@@ -126,7 +131,7 @@ func run(argv []string, stdin io.Reader, out io.Writer) error {
 		return nil
 	}
 	cmd := argv[0]
-	a, err := parseArgs(argv[1:], map[string]bool{"name": true, "from": true, "to": true, "out": true, "tz": true, "username": true, "server": true})
+	a, err := parseArgs(argv[1:], map[string]bool{"name": true, "from": true, "to": true, "out": true, "tz": true, "username": true, "server": true, "timeout": true})
 	if err != nil {
 		return err
 	}
@@ -135,6 +140,10 @@ func run(argv []string, stdin io.Reader, out io.Writer) error {
 	}
 	id, err := loadIdentity()
 	if err != nil {
+		if l, name := loadPending(); l != nil && cmd == "status" {
+			fmt.Fprintf(out, "Not linked yet. A link for %q is waiting for approval until %s:\n  %s\nRun `tekkoh link --wait` once it's approved.\n", name, l.expires.Local().Format("15:04 MST"), l.url)
+			return nil
+		}
 		return err
 	}
 	if cmd == "status" {
@@ -195,6 +204,75 @@ func link(a args, stdin io.Reader, out io.Writer) error {
 	if old, err := loadIdentity(); err == nil {
 		return fmt.Errorf("already linked to %s's journal as %q; run `tekkoh unlink` first", old.Handle, old.Label)
 	}
+	if a.has("pin") {
+		return linkWithPIN(a, stdin, out)
+	}
+	if a.has("wait") {
+		return linkWait(a, out)
+	}
+	name := strings.TrimSpace(a.flags["name"])
+	if name == "" {
+		host, _ := os.Hostname()
+		name = "Agent on " + strings.Split(host, ".")[0]
+	}
+	if len(name) > 60 {
+		name = name[:60]
+	}
+	// The same link again, while it lasts: the person may already have it.
+	l, was := loadPending()
+	if l == nil || was != name || a.has("new") {
+		var err error
+		if l, err = startAppLink(newClient(a.flags["server"]), name); err != nil {
+			return err
+		}
+		if err := l.save(name); err != nil {
+			return err
+		}
+	}
+	if a.has("json") {
+		return emit(out, map[string]any{"url": l.url, "code": l.code, "name": name, "expires": l.expires.Format(time.RFC3339)})
+	}
+	fmt.Fprintf(out, `Send this link to the person whose journal it is:
+
+  %s
+
+On their iPhone it opens Tekkoh, which asks them to approve %q. On a
+computer it shows a code to scan with the phone. Tell them the phone will
+show %s %s. The link works once, until %s.
+
+Then run: tekkoh link --wait
+`, l.url, name, l.code[:3], l.code[3:], l.expires.Local().Format("15:04 MST"))
+	return nil
+}
+
+// linkWait collects an approved link. It gives up after --timeout (90s by
+// default, inside most agents' limits on a command) and can be run again.
+func linkWait(a args, out io.Writer) error {
+	l, name := loadPending()
+	if l == nil {
+		return errors.New("no link is waiting (or it expired); run `tekkoh link` for one")
+	}
+	wait := 90 * time.Second
+	if t := a.flags["timeout"]; t != "" {
+		d, err := time.ParseDuration(t)
+		if err != nil {
+			return fmt.Errorf("--timeout: %w", err)
+		}
+		wait = d
+	}
+	id, err := l.collect(name, 1500*time.Millisecond, time.Now().Add(wait))
+	if errors.Is(err, errStillWaiting) {
+		return fmt.Errorf("not approved yet; the link works until %s, so run `tekkoh link --wait` again (or `tekkoh link` to see it)", l.expires.Local().Format("15:04 MST"))
+	}
+	os.Remove(pendingPath())
+	if err != nil {
+		return err
+	}
+	return linked(id, out)
+}
+
+// linkWithPIN: in a terminal, with the username, PIN and the phone's camera.
+func linkWithPIN(a args, stdin io.Reader, out io.Writer) error {
 	p := prompter{bufio.NewReader(stdin), out}
 	name := a.flags["name"]
 	if name == "" {
@@ -228,6 +306,10 @@ func link(a args, stdin io.Reader, out io.Writer) error {
 	if err != nil {
 		return err
 	}
+	return linked(id, out)
+}
+
+func linked(id *identity, out io.Writer) error {
 	if err := saveIdentity(id); err != nil {
 		return err
 	}
@@ -235,7 +317,7 @@ func link(a args, stdin io.Reader, out io.Writer) error {
 	if tz == "" {
 		tz = "this machine's"
 	}
-	fmt.Fprintf(out, "\nLinked to %s's journal as %q, in %s time zone.\nThe key is in %s, readable only by you. Your phone can sign this agent out at any time.\n",
+	fmt.Fprintf(out, "Linked to %s's journal as %q, in %s time zone.\nThe key is in %s, readable only by you. Their phone can sign this agent out at any time.\n",
 		id.Handle, id.Label, tz, filepath.Join(home(), "identity.json"))
 	return nil
 }

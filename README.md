@@ -66,14 +66,23 @@ checked against the Swift vectors in `crypto_test.go`.
 GOOS=linux GOARCH=amd64 go build -o tekkoh ./cmd/tekkoh   # for the VM
 ```
 
-**Link it once**, with you there. It needs your username, your PIN and
-your phone, as linking a browser does:
+Or have the agent install it from https://tekkoh.com/setup.txt, which
+says how. The binaries there are reproducible builds of this command.
+
+**Link it once.** The agent prints a one-time link and sends it to you; you
+approve it on your phone. No PIN is typed anywhere:
 
 ```sh
 tekkoh link --name "Morning agent"
-# Username, PIN, then a QR code: on the phone, Settings, Link a browser or
-# agent, scan it and check the six digits match.
+# https://tekkoh.com/link#s=…&k=…&n=Morning%20agent: on the iPhone it opens
+# Tekkoh, which shows the agent's name and six digits and asks for Face ID.
+# On a computer, the page shows the link as a code for the phone's camera.
+tekkoh link --wait        # collects it once approved (gives up after 90s;
+                          # run it again; the link lasts 15 minutes)
 ```
+
+With a terminal you can type into, `tekkoh link --pin` links as a browser
+does instead: username, PIN, and a QR code to scan with the phone.
 
 **Then the agent can:**
 
@@ -105,8 +114,8 @@ the phone can sign it out too.
 
 Tests: `go test ./cmd/tekkoh` checks the crypto against the app's
 vectors. `TEKKOH_LIVE=1 go test -run Live ./cmd/tekkoh` runs the whole
-cycle on a throwaway journal against the server and then deletes it: link,
-write, a concurrent edit, notes, search, and sign-out. Set `TEKKOH_SERVER`
+cycle on a throwaway journal against the server and then deletes it: both
+ways of linking, write, a concurrent edit, notes, search, and sign-out. Set `TEKKOH_SERVER`
 and `TEKKOH_SERVER_KEY` to run it against another server.
 
 ## API

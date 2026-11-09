@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -153,6 +154,53 @@ func TestLive(t *testing.T) {
 	if err := run([]string{"read"}, strings.NewReader(""), &out); err == nil || !strings.Contains(err.Error(), "signed out") {
 		t.Fatalf("after sign-out: %v", err)
 	}
+	os.Remove(home() + "/identity.json")
+
+	// Linking by link, approved on the phone: no PIN.
+	cli("link", "--name", "Chat agent")
+	var lj struct{ URL, Code, Name string }
+	json.Unmarshal([]byte(cli("link", "--name", "Chat agent", "--json")), &lj)
+	frag, _ := url.ParseQuery(strings.SplitN(lj.URL, "#", 2)[1])
+	if !strings.HasPrefix(lj.URL, "https://tekkoh.com/link#") || frag.Get("n") != "Chat agent" || len(lj.Code) != 6 {
+		t.Fatalf("link: %+v", lj)
+	}
+	if fi, _ := os.Stat(pendingPath()); fi.Mode().Perm() != 0o600 {
+		t.Fatalf("pending.json mode %v", fi.Mode())
+	}
+	if out := cli("status"); !strings.Contains(out, "waiting for approval") {
+		t.Fatalf("status while waiting: %s", out)
+	}
+	out.Reset()
+	if err := run([]string{"link", "--wait", "--timeout", "1s"}, strings.NewReader(""), &out); err == nil || !strings.Contains(err.Error(), "not approved yet") {
+		t.Fatalf("before approval: %v", err)
+	}
+	pub, _ = b64url.DecodeString(frag.Get("k"))
+	parts = []string{"", "", frag.Get("s")}
+	if linkCode(pub) != lj.Code {
+		t.Fatal("the code doesn't come from the link's key")
+	}
+	// A key that isn't the journal's doesn't link, even sent by its phone.
+	phone(random(32), handle)
+	out.Reset()
+	if err := run([]string{"link", "--wait", "--timeout", "5s"}, strings.NewReader(""), &out); err == nil || !strings.Contains(err.Error(), "doesn't open") {
+		t.Fatalf("wrong key: %v", err)
+	}
+	cli("link", "--name", "Chat agent")
+	json.Unmarshal([]byte(cli("link", "--name", "Chat agent", "--json")), &lj)
+	frag, _ = url.ParseQuery(strings.SplitN(lj.URL, "#", 2)[1])
+	pub, _ = b64url.DecodeString(frag.Get("k"))
+	parts = []string{"", "", frag.Get("s")}
+	phone(K, handle)
+	if out := cli("link", "--wait"); !strings.Contains(out, `as "Chat agent"`) {
+		t.Fatalf("approved: %s", out)
+	}
+	if _, err := os.Stat(pendingPath()); err == nil {
+		t.Fatal("pending.json left behind")
+	}
+	if out := cli("read", "2026-11-08"); !strings.Contains(out, "Rain all morning") {
+		t.Fatalf("read after linking by link: %s", out)
+	}
+	cli("unlink")
 }
 
 func must(b []byte, err error) []byte {

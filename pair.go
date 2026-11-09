@@ -19,11 +19,19 @@ import (
 // The browser then checks the key against the one the username and PIN
 // unlock (the ordinary recovery path), so linking needs the phone and the
 // PIN, and they must be the same journal's.
+//
+// An agent's slot lasts longer: the agent sends you a link in a chat, and
+// you may not tap it for a few minutes. You approve it in the app, which
+// already holds the key, so it needs no PIN.
 
-const pairTTL = 5 * time.Minute
+const (
+	pairTTL      = 5 * time.Minute
+	agentPairTTL = 15 * time.Minute
+)
 
 type pairSlot struct {
 	created time.Time
+	ttl     time.Duration
 	box     []byte
 	handle  string
 }
@@ -37,17 +45,27 @@ func newPairing() *pairing { return &pairing{slots: map[string]*pairSlot{}} }
 
 func (p *pairing) sweep() {
 	for id, s := range p.slots {
-		if time.Since(s.created) > pairTTL {
+		if time.Since(s.created) > s.ttl {
 			delete(p.slots, id)
 		}
 	}
 }
 
-// openSlot: a browser starts linking.
+// openSlot: a browser, or an agent ({"for": "agent"}), starts linking.
 func (s *Server) openSlot(w http.ResponseWriter, r *http.Request) {
 	if !s.limit.allow("pair:" + clientIP(r)) {
 		fail(w, 429, "too many tries; wait a while")
 		return
+	}
+	var body struct {
+		For string `json:"for"`
+	}
+	if r.ContentLength != 0 && !readJSON(w, r, &body, 1<<10) {
+		return
+	}
+	ttl := pairTTL
+	if body.For == "agent" {
+		ttl = agentPairTTL
 	}
 	s.pair.mu.Lock()
 	defer s.pair.mu.Unlock()
@@ -57,8 +75,8 @@ func (s *Server) openSlot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := randomID()
-	s.pair.slots[id] = &pairSlot{created: time.Now()}
-	writeJSON(w, 201, map[string]any{"id": id, "expiresIn": int(pairTTL.Seconds())})
+	s.pair.slots[id] = &pairSlot{created: time.Now(), ttl: ttl}
+	writeJSON(w, 201, map[string]any{"id": id, "expiresIn": int(ttl.Seconds())})
 }
 
 // fillSlot: the phone, signed in as the journal's owner, puts the sealed

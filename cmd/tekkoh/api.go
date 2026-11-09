@@ -169,9 +169,16 @@ type slot struct {
 	ExpiresIn int    `json:"expiresIn"`
 }
 
-func (c *client) openSlot() (slot, error) {
+func (c *client) openSlot() (slot, error) { return c.openSlotFor("") }
+
+// openSlotFor("agent") asks for the longer wait a link in a chat needs.
+func (c *client) openSlotFor(kind string) (slot, error) {
 	var s slot
-	_, err := c.do("POST", "/v1/pair", nil, &s)
+	var body any
+	if kind != "" {
+		body = map[string]string{"for": kind}
+	}
+	_, err := c.do("POST", "/v1/pair", body, &s)
 	return s, err
 }
 
