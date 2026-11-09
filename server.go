@@ -91,6 +91,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /v1/pair", s.openSlot)
 	mux.HandleFunc("PUT /v1/pair/{id}", s.owner(s.fillSlot))
 	mux.HandleFunc("GET /v1/pair/{id}", s.takeSlot)
+	mux.HandleFunc("GET /v1/pair/{id}/state", s.slotState)
 	mux.HandleFunc("POST /v1/sessions", s.owner(s.createSession))
 	mux.HandleFunc("GET /v1/sessions", s.owner(s.listSessions))
 	mux.HandleFunc("DELETE /v1/sessions/{id}", s.auth(s.deleteSession))

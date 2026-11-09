@@ -458,6 +458,37 @@ func TestPairingHandsOverOnceThroughTheOwner(t *testing.T) {
 	}
 }
 
+func TestALinksPageCanSeeHowItsGettingOn(t *testing.T) {
+	c, _, _ := newClient(t)
+	a := signUp(t, c, "lia")
+	_, out := c.do("POST", "/v1/pair", map[string]any{"for": "agent"}, "")
+	id := out["id"].(string)
+	state := func() any { _, o := c.do("GET", "/v1/pair/"+id+"/state", nil, ""); return o["state"] }
+	if s := state(); s != "waiting" {
+		t.Fatalf("before: %v", s)
+	}
+	c.do("PUT", "/v1/pair/"+id, map[string]any{"box": enc(random(80))}, a.header)
+	if s := state(); s != "approved" {
+		t.Fatalf("filled: %v", s)
+	}
+	if code, _ := c.do("GET", "/v1/pair/"+id, nil, ""); code != 200 {
+		t.Fatalf("take: %d", code)
+	}
+	if s := state(); s != "linked" {
+		t.Fatalf("taken: %v", s)
+	}
+	// Taken, it can't be taken or filled again.
+	if code, _ := c.do("GET", "/v1/pair/"+id, nil, ""); code != 404 {
+		t.Fatalf("taken twice: %d", code)
+	}
+	if code, _ := c.do("PUT", "/v1/pair/"+id, map[string]any{"box": enc(random(80))}, a.header); code != 409 {
+		t.Fatalf("refilled after taking: %d", code)
+	}
+	if _, o := c.do("GET", "/v1/pair/nosuchslot1234567890/state", nil, ""); o["state"] != "expired" {
+		t.Fatalf("unknown: %v", o)
+	}
+}
+
 func TestAnAgentsLinkWaitsLongerThanABrowsers(t *testing.T) {
 	c, _, _ := newClient(t)
 	if code, out := c.do("POST", "/v1/pair", nil, ""); code != 201 || out["expiresIn"] != float64(300) {

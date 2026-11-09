@@ -34,6 +34,7 @@ type pairSlot struct {
 	ttl     time.Duration
 	box     []byte
 	handle  string
+	taken   bool // collected: kept until it expires, so its page can say so
 }
 
 type pairing struct {
@@ -100,7 +101,7 @@ func (s *Server) fillSlot(w http.ResponseWriter, r *http.Request, h string) {
 		fail(w, 404, "that code has expired; show a new one")
 		return
 	}
-	if slot.box != nil {
+	if slot.box != nil || slot.taken {
 		fail(w, 409, "already linked")
 		return
 	}
@@ -116,14 +117,38 @@ func (s *Server) takeSlot(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	slot, ok := s.pair.slots[id]
 	switch {
-	case !ok:
+	case !ok || slot.taken:
 		fail(w, 404, "that code has expired")
 	case slot.box == nil:
 		writeJSON(w, 202, map[string]any{"waiting": true})
 	default:
-		delete(s.pair.slots, id)
-		writeJSON(w, 200, map[string]any{"box": b64(slot.box), "handle": slot.handle})
+		box := slot.box
+		slot.box, slot.taken = nil, true
+		writeJSON(w, 200, map[string]any{"box": b64(box), "handle": slot.handle})
 	}
+}
+
+// slotState: how a link is getting on, for the page an agent's link opens
+// (on tekkoh.com, so any origin may ask). It says only "waiting",
+// "approved" (the phone has filled it), "linked" (the agent has collected
+// it) or "expired"; never whose it is, and it doesn't use the slot up.
+func (s *Server) slotState(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	s.pair.mu.Lock()
+	defer s.pair.mu.Unlock()
+	s.pair.sweep()
+	state := "expired"
+	if slot, ok := s.pair.slots[r.PathValue("id")]; ok {
+		switch {
+		case slot.taken:
+			state = "linked"
+		case slot.box != nil:
+			state = "approved"
+		default:
+			state = "waiting"
+		}
+	}
+	writeJSON(w, 200, map[string]any{"state": state})
 }
 
 // ---- sessions ----

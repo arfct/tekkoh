@@ -132,9 +132,10 @@ and `TEKKOH_SERVER_KEY` to run it against another server.
 | `PUT /v1/entries/:id` | `{data, rev}`; 409 if `rev` isn't current |
 | `DELETE /v1/entries/:id?rev=` | leaves a tombstone for other devices |
 | `PUT/GET/DELETE /v1/blobs/:id` | encrypted photo bytes |
-| `POST /v1/pair` | a browser opens a linking slot: `{id, expiresIn}` |
+| `POST /v1/pair` | a browser opens a linking slot: `{id, expiresIn}`; `{"for": "agent"}` for an agent's, which lasts 15 minutes |
 | `PUT /v1/pair/:id` | (the phone) `{box}`: the journal key sealed to the browser |
 | `GET /v1/pair/:id` | the browser collects it once: `{box, handle}`, or 202 while waiting |
+| `GET /v1/pair/:id/state` | (any origin) how a link is getting on, for its page: `waiting`, `approved`, `linked` or `expired` |
 | `POST /v1/sessions`, `GET /v1/sessions` | (the phone) link a browser's or agent's session (`kind`: `browser` or `agent`); list them |
 | `DELETE /v1/sessions/:id` | the phone signs a browser out; a browser signs itself out with `current` |
 
