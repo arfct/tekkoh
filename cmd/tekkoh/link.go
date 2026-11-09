@@ -257,7 +257,7 @@ func (l *linkStart) collect(label string, poll time.Duration, until time.Time) (
 	return nil, errLinkGone
 }
 
-var errLinkGone = errors.New("the link expired before it was approved; run `tekkoh link` for a new one")
+var errLinkGone = errors.New("the link expired before it was approved")
 
 // qrBlock draws a QR code with half-height blocks, dark on light whatever
 // the terminal's colours, with the quiet zone scanners need.

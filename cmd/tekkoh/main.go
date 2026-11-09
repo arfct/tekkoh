@@ -141,7 +141,7 @@ func run(argv []string, stdin io.Reader, out io.Writer) error {
 	id, err := loadIdentity()
 	if err != nil {
 		if l, name := loadPending(); l != nil && cmd == "status" {
-			fmt.Fprintf(out, "Not linked yet. A link for %q is waiting for approval until %s:\n  %s\nRun `tekkoh link --wait` once it's approved.\n", name, l.expires.Local().Format("15:04 MST"), l.url)
+			fmt.Fprintf(out, "Not linked yet. A link for %q is waiting for approval until %s:\n  %s\n", name, l.expires.Local().Format("15:04 MST"), l.url)
 			return nil
 		}
 		return err
@@ -232,15 +232,13 @@ func link(a args, stdin io.Reader, out io.Writer) error {
 	if a.has("json") {
 		return emit(out, map[string]any{"url": l.url, "code": l.code, "name": name, "expires": l.expires.Format(time.RFC3339)})
 	}
-	fmt.Fprintf(out, `Send this link to the person whose journal it is:
-
-  %s
-
-On their iPhone it opens Tekkoh, which asks them to approve %q. On a
-computer it shows a code to scan with the phone. Tell them the phone will
-show %s %s. The link works once, until %s.
-
-Then run: tekkoh link --wait
+	// Facts, not instructions: an agent reading this shouldn't find a tool
+	// telling it what to do. What to do with them is in its setup.
+	fmt.Fprintf(out, `Link:    %s
+Agent:   %s
+Code:    %s %s
+Expires: %s (works once)
+Status:  waiting for approval in Tekkoh on the journal owner's iPhone
 `, l.url, name, l.code[:3], l.code[3:], l.expires.Local().Format("15:04 MST"))
 	return nil
 }
@@ -250,7 +248,7 @@ Then run: tekkoh link --wait
 func linkWait(a args, out io.Writer) error {
 	l, name := loadPending()
 	if l == nil {
-		return errors.New("no link is waiting (or it expired); run `tekkoh link` for one")
+		return errors.New("no link is waiting for approval (none was made, or it expired)")
 	}
 	wait := 90 * time.Second
 	if t := a.flags["timeout"]; t != "" {
@@ -262,7 +260,7 @@ func linkWait(a args, out io.Writer) error {
 	}
 	id, err := l.collect(name, 1500*time.Millisecond, time.Now().Add(wait))
 	if errors.Is(err, errStillWaiting) {
-		return fmt.Errorf("not approved yet; the link works until %s, so run `tekkoh link --wait` again (or `tekkoh link` to see it)", l.expires.Local().Format("15:04 MST"))
+		return fmt.Errorf("not approved yet (the link is valid until %s)", l.expires.Local().Format("15:04 MST"))
 	}
 	os.Remove(pendingPath())
 	if err != nil {
