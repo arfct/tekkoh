@@ -1,7 +1,7 @@
 # tekkoh-berth
 
 The server for [Tekkoh](https://github.com/arfct/tekkoh-ios), an encrypted
-daily journal. It stores accounts, entries and photos, and gives a new phone
+daily journal ([on the App Store](https://apps.apple.com/app/tekkoh/id6832421132)). It stores accounts, entries and photos, and gives a new phone
 its journal key back for the right PIN. Everything a person writes is
 encrypted on their phone first: the server holds ciphertext it can't read.
 
